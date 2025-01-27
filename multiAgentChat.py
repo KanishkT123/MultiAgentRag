@@ -7,7 +7,7 @@ from typing import List
 from tenacity import retry, stop_after_attempt, wait_random_exponential 
 import logging
 from openai import AzureOpenAI
-from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_agentchat.conditions import MaxMessageTermination, TextMentionTermination
 from autogen_agentchat.teams import SelectorGroupChat
 from autogen_agentchat.ui import Console
@@ -153,6 +153,14 @@ def execute_sql(containerName:str, query:str):
     
     return results if results else "No records found."
 
+# Async function to retrieve input from UI
+async def get_user_input(prompt: str, cancellation_token):
+    while not user_input.value.strip():
+        await asyncio.sleep(0.1)  # Wait for input asynchronously
+    text = user_input.value.strip()
+    user_input.value = ""  # Clear input field after reading
+    return text
+
 ##########
 # Agents #
 ##########
@@ -176,6 +184,8 @@ orchestrator = AssistantAgent(
 
     You do not directly execute queries yourself. Instead, post the broken-down tasks in the group chat, and let the relevant agent respond.
     Once all tasks are complete, summarize the findings and end with "TERMINATE".
+
+    If you need to ask for further clarification, you can ask the user for more input.
     """,
     model_client=az_model_client
 )
@@ -231,17 +241,22 @@ sql_agent = AssistantAgent(
     reflect_on_tool_use=True
 )
 
+user_proxy = UserProxyAgent("user", input_func=get_user_input)
+
+########
+# Team #
+########
+
 # Create a group chat with the orchestrator and agents
 text_mention_termination = TextMentionTermination("TERMINATE")
 max_messages_termination = MaxMessageTermination(max_messages=5)
-termination = text_mention_termination | max_messages_termination
+termination = text_mention_termination
 
 team = SelectorGroupChat(
-    [orchestrator, rag_agent, sql_agent],
+    [orchestrator, rag_agent, sql_agent, user_proxy],
     model_client=az_model_client,
     termination_condition=termination,
 )
-
 
 #########
 # Panel #
