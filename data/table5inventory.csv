@@ -1,0 +1,11 @@
+InventoryID,SpeciesID,QuantityOnHand,StorageLocation
+1,1,500,Warehouse A
+2,2,300,Warehouse B
+3,3,150,Warehouse C
+4,4,200,Warehouse A
+5,5,350,Warehouse B
+6,6,100,Warehouse C
+7,7,450,Warehouse A
+8,8,250,Warehouse B
+9,9,600,Warehouse C
+10,10,400,Warehouse A

@@ -1,0 +1,11 @@
+SpeciesID,MinDaysToRot,MaxDaysToRot,SignsOfRot
+1,12,16,"Wrinkling skin, soft spots, mold"
+2,10,14,"Soft patches, slightly fermented smell"
+3,6,8,"Brown spots, mushy texture, smell"
+4,4,6,"Soft and brown skin, leaking sap"
+5,7,10,"Drying peel, sour smell, mold growth"
+6,6,9,"Sticky juice leaks, slight bitterness"
+7,3,5,"Black spots, strong sour odor"
+8,4,6,"Dark skin, sap leakage, sour smell"
+9,2,4,"Mold on surface, discoloration"
+10,3,5,"Shrinking, soft texture, mold patches"
