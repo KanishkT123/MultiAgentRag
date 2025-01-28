@@ -60,22 +60,34 @@ ml_client = MLClient(credential=credential,
                          subscription_id=AZURE_SUBSCRIPTION_ID, 
                          resource_group_name=AZURE_ML_STUDIO_RG,
                          workspace_name=AZURE_ML_STUDIO_WS)
+
+##########
+# MLFlow #
+##########
+
 workspace = ml_client.workspace_name
 mlflow_tracking_uri = ml_client.workspaces.get(
     ml_client.workspace_name
 ).mlflow_tracking_uri
 
 mlflow.set_tracking_uri(mlflow_tracking_uri)
-logging.getLogger("azure").setLevel(logging.DEBUG)
+logging.getLogger("azure").setLevel(logging.ERROR)
+logging.getLogger("mlflow").setLevel(logging.ERROR)
 
 experiment_name = "Autogen Multi-Agent RAG"
 mlflow.set_experiment(experiment_name)
 mlflow.autolog()
 
+# Start a single MLflow parent run for the entire chat session
+global mlflow_parent_run
+mlflow_parent_run = None  # Store the parent run globally
 
-##########
-# MLFlow #
-##########
+# Ensure the parent run is closed when the session ends
+def close_mlflow_run():
+    global mlflow_parent_run
+    if mlflow_parent_run:
+        mlflow.end_run()
+        mlflow_parent_run = None  # Reset after ending
 
 # Function to log agent responses in MLflow
 def log_agent_response(agent_name, input_query, response, start_time):
@@ -282,24 +294,38 @@ def add_message(sender, text):
             styles=agent_styles.get(sender, {"background-color": "#F1F1F1", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content"})
         )
     )
-
 async def run_chat():
+    global mlflow_parent_run
+
     task = user_input.value.strip()
     if not task:
-        return  # Do nothing if empty input
+        return
+
+    # Close any existing MLflow run before starting a new one
+    close_mlflow_run()
 
     add_message("user", task)  # Show user message
     user_input.value = ""  # Clear input field
-    sender = 'user'
-    start_time = time.time()  # Start timer for response time
+    start_time = time.time()
+
+    # Start a new MLflow parent run for the chat session
+    mlflow_parent_run = mlflow.start_run(run_name="Multi-Agent Chat Session 2")
 
     async for chunk in team.run_stream(task=task):
-        if type(chunk) is TaskResult:
+        if isinstance(chunk, TaskResult):
             continue
-        else:
-            sender = chunk.source
-            add_message(sender, chunk.content)
-            log_agent_response(sender, task, chunk.content, start_time)  # Log response to MLflow
+        sender = chunk.source
+        add_message(sender, chunk.content)
+
+        # Use a unique nested run for each agent response to prevent overwriting
+        with mlflow.start_run(run_id=mlflow_parent_run.info.run_id, nested=True):
+            mlflow.log_param("agent", sender)  # Each nested run has its own param scope
+            mlflow.log_text(task, "input_query.txt")  # Log query in text file to prevent overwriting
+            mlflow.log_metric("response_time", time.time() - start_time)
+            mlflow.log_text(chunk.content, f"{sender}_response.txt")
+
+    # Ensure MLflow run closes when conversation ends
+    close_mlflow_run()
 
 # Button click event
 def on_click(event):
@@ -314,8 +340,5 @@ dashboard = pn.Column(
     pn.Row(user_input, run_button)
 )
 
-# Serve the Panel App
-if __name__ == "__main__":
-    pn.serve(dashboard, port=8501, show=True)
-    # Serve the app
-    dashboard.servable()
+# Serve the app
+dashboard.servable()
