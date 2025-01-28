@@ -1,4 +1,5 @@
 from autogen_agentchat.agents import AssistantAgent
+from azure.ai.ml import MLClient
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from azure.cosmos import CosmosClient
 import os
@@ -10,16 +11,17 @@ from openai import AzureOpenAI
 from autogen_agentchat.agents import AssistantAgent, UserProxyAgent
 from autogen_agentchat.conditions import MaxMessageTermination, TextMentionTermination
 from autogen_agentchat.teams import SelectorGroupChat
-from autogen_agentchat.ui import Console
 from autogen_ext.models.openai import AzureOpenAIChatCompletionClient
-from autogen_agentchat.messages import TextMessage
 from autogen_agentchat.base import TaskResult
 import asyncio
 import panel as pn
+import mlflow, mlflow.pyfunc
+import time
+
+
 
 # Load environment variables from .env file
 load_dotenv()
-logging.basicConfig(level=logging.ERROR)
 
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_ORCH_MODEL = os.getenv("AZURE_ORCH_MODEL")
@@ -28,19 +30,15 @@ DATABASE_NAME = os.getenv("DATABASE_NAME")
 AZURE_EMBEDDING= os.getenv("AZURE_EMBEDDING")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
 DIMENSIONS = 1536
+AZURE_SUBSCRIPTION_ID = os.getenv("AZURE_SUBSCRIPTION_ID")
+AZURE_ML_STUDIO_RG = os.getenv("AZURE_ML_STUDIO_RG")
+AZURE_ML_STUDIO_WS = os.getenv("AZURE_ML_STUDIO_WS")
 
 # Authenticate using Managed Identity (DefaultAzureCredential)
 credential = DefaultAzureCredential()
+
 # Create the token provider
 token_provider = get_bearer_token_provider(credential, "https://cognitiveservices.azure.com/.default")
-
-# Connect to CosmosDB
-client = CosmosClient(COSMOS_URL, credential)
-db = client.create_database_if_not_exists(DATABASE_NAME)
-
-# Connect to OpenAI (for embedding)
-openai_client = AzureOpenAI(azure_endpoint=AZURE_OPENAI_ENDPOINT, api_key=AZURE_OPENAI_KEY, api_version="2023-05-15")
-
 # Connect to Azure Chat Model (for all agents)
 az_model_client = AzureOpenAIChatCompletionClient(
     azure_deployment=AZURE_ORCH_MODEL,
@@ -50,6 +48,44 @@ az_model_client = AzureOpenAIChatCompletionClient(
     azure_ad_token_provider=token_provider
 )
 
+# Connect to CosmosDB
+client = CosmosClient(COSMOS_URL, credential)
+db = client.create_database_if_not_exists(DATABASE_NAME)
+
+# Connect to OpenAI (for embedding)
+openai_client = AzureOpenAI(azure_endpoint=AZURE_OPENAI_ENDPOINT, api_key=AZURE_OPENAI_KEY, api_version="2023-05-15")
+
+# Connect to ML Studio for MLFlow Tracking
+ml_client = MLClient(credential=credential,
+                         subscription_id=AZURE_SUBSCRIPTION_ID, 
+                         resource_group_name=AZURE_ML_STUDIO_RG,
+                         workspace_name=AZURE_ML_STUDIO_WS)
+workspace = ml_client.workspace_name
+mlflow_tracking_uri = ml_client.workspaces.get(
+    ml_client.workspace_name
+).mlflow_tracking_uri
+
+mlflow.set_tracking_uri(mlflow_tracking_uri)
+logging.getLogger("azure").setLevel(logging.DEBUG)
+
+experiment_name = "Autogen Multi-Agent RAG"
+mlflow.set_experiment(experiment_name)
+mlflow.autolog()
+
+
+##########
+# MLFlow #
+##########
+
+# Function to log agent responses in MLflow
+def log_agent_response(agent_name, input_query, response, start_time):
+    elapsed_time = time.time() - start_time
+    with mlflow.start_run(nested=True):  # Create a nested run for each query
+        mlflow.log_param("agent", agent_name)
+        mlflow.log_param("input_query", input_query)
+        mlflow.log_metric("response_time", elapsed_time)
+        mlflow.log_text(response, f"{agent_name}_response.txt")
+        print(f"Logged {agent_name} response in MLflow.")
 
 #########
 # Tools #
@@ -132,24 +168,29 @@ def retrieve_results(query:str, containerName:str, fields:List[str]) -> List[str
     results = vector_search(container, embedding, fields)
     return results
 
-def execute_sql(containerName:str, query:str):
+def execute_sql(containerName: str, query: str, params: dict = None):
     '''
-    Execute a SQL query on the specified container in CosmosDB.
+    Securely execute a SQL query using parameters in CosmosDB.
+    
     Args:
         containerName (str): The name of the container to query.
-        query (str): The SQL query to execute. Must be a read-only query.
+        query (str): The parameterized SQL query.
+        params (dict): The query parameters as a dictionary.
+    
+    Returns:
+        List of results or an error message.
     '''
     container = db.get_container_client(containerName)
 
-    if not query.startswith("SELECT"):
+    if not query.strip().upper().startswith("SELECT"):
         return "Error: Only read operations (SELECT queries) are allowed."
 
-    results = []
-    for item in container.query_items(
+    # Securely execute the query with parameters
+    results = list(container.query_items(
         query=query,
-        enable_cross_partition_query=True  # Enable cross-partition querying
-    ):
-        results.append(item)
+        parameters=[{"name": key, "value": value} for key, value in (params or {}).items()],
+        enable_cross_partition_query=True
+    ))
     
     return results if results else "No records found."
 
@@ -161,6 +202,11 @@ async def get_user_input(prompt: str, cancellation_token):
     user_input.value = ""  # Clear input field after reading
     return text
 
+# Load system prompts from files
+def load_prompt(prompt_file):
+    with open(prompt_file, "r", encoding="utf-8") as file:
+        return file.read()
+
 ##########
 # Agents #
 ##########
@@ -168,43 +214,14 @@ async def get_user_input(prompt: str, cancellation_token):
 orchestrator = AssistantAgent(
     name= "orchestrator_agent",
     description = "An orchestrator agent that breaks down a complex query into subqueries. This agent should be the first to engage.",
-    system_message = """
-    You are an orchestration agent.
-    Your job is to break down complex tasks into smaller, manageable subtasks amd assign tasks to other team members.
-    Your team members are:
-        - sql_agent: A helpful SQL query agent with access to CosmosDB. You assign structured data retrieval tasks to this agent. It has access to a database of fruits, species, rotting times, complaints, and current inventory. 
-        - rag_agent: A helpful Retrieval Agent with access to VectorSearch. You assign unstructured data retrieval tasks to this agent. It has access to a database of fruits and complaints. The descriptions and complaints are both vectorized.
-
-    These are all the containers in the attached CosmosDB:
-        - Fruits: FruitID, Name, Color, Description, Season
-        - FruitSpecies: FruitID,SpeciesID,SpeciesName
-        - SpeciesRottingTime: SpeciesID,MinDaysToRot,MaxDaysToRot,SignsOfRot
-        - Complaints: ComplaintID,SpeciesID,ComplaintDescription
-        - Inventory: InventoryID,SpeciesID,QuantityOnHand,StorageLocation
-
-    You do not directly execute queries yourself. Instead, post the broken-down tasks in the group chat, and let the relevant agent respond.
-    Once all tasks are complete, summarize the findings and end with "TERMINATE".
-
-    If you need to ask for further clarification, you can ask the user for more input.
-    """,
+    system_message = load_prompt("system_prompts/orchestrator_prompt.txt"),
     model_client=az_model_client
 )
 
 rag_agent = AssistantAgent(
     name = "rag_agent",
     description="A retrieval agent that retrieves unstructured data using Vector Search.",
-    system_message = """You are a helpful Retrieval Agent. You retrieve fruit descriptions and complaints from a Cosmos DB with vector search enabled.
-    You are an expert in retrieving relevant complaints, fruit descriptions, and unstructured data from Azure AI Search.
-    Use tools to find the most relevant information based on the given query.
-    You have access to the following containers:
-    - Complaints: ComplaintID,SpeciesID,ComplaintDescription
-    - Fruits: FruitID,Name,Color,Description,Season
-
-    The descriptions and complaints are both vectorized.
-    You can choose to return multiple fields if it will provide useful information.
-
-    If the query is not related to unstructured text retrieval, let the SQL agent handle it.
-    """,
+    system_message = load_prompt("system_prompts/rag_prompt.txt"),
     tools = [retrieve_results],
     reflect_on_tool_use=True,
     model_client=az_model_client
@@ -213,29 +230,7 @@ rag_agent = AssistantAgent(
 sql_agent = AssistantAgent(
     name = "sql_agent",
     description= "A SQL query agent that retrieves structured data from CosmosDB.",
-    system_message = """
-    You are a helpful SQL query agent. You convert natural language queries to SQL queries and execute them on CosmosDB.
-    Your only job is to handle structured data retrieval tasks.
-    You have access to the following 5 containers and columns:
-    - Fruits: FruitID, Name, Color, Description, Season
-    - FruitSpecies: FruitID,SpeciesID,SpeciesName
-    - SpeciesRottingTime: SpeciesID,MinDaysToRot,MaxDaysToRot,SignsOfRot
-    - Complaints: ComplaintID,SpeciesID,ComplaintDescription
-    - Inventory: InventoryID,SpeciesID,QuantityOnHand,StorageLocation
-
-    When responding:
-    - **Convert natural language into SQL** using the schema.
-    - These queries are executed through CosmosDB using the Azure Cosmos Python SDK.
-    - **Execute the SQL query** and return results.
-    - **Only query existing tables and columns**.
-    - **Do not add or modify data**.
-    - **ALL QUERIES MUST START WITH SELECT**
-    - **NEVER RETRIEVE ALL RECORDS FROM ANY CONTAINER. THERE ARE TOO MANY ENTRIES FOR THIS.**
-
-    An example of a valid query is "SELECT c.FruitID FROM c WHERE c.Color = 'Yellow'" for the Fruits container.
-
-    Do not ask for clarification unless you must.
-    """,
+    system_message = load_prompt("system_prompts/sql_prompt.txt"),
     model_client=az_model_client,
     tools=[execute_sql],
     reflect_on_tool_use=True
@@ -257,7 +252,6 @@ team = SelectorGroupChat(
     model_client=az_model_client,
     termination_condition=termination,
 )
-
 
 #########
 # Panel #
@@ -297,6 +291,7 @@ async def run_chat():
     add_message("user", task)  # Show user message
     user_input.value = ""  # Clear input field
     sender = 'user'
+    start_time = time.time()  # Start timer for response time
 
     async for chunk in team.run_stream(task=task):
         if type(chunk) is TaskResult:
@@ -304,6 +299,7 @@ async def run_chat():
         else:
             sender = chunk.source
             add_message(sender, chunk.content)
+            log_agent_response(sender, task, chunk.content, start_time)  # Log response to MLflow
 
 # Button click event
 def on_click(event):
@@ -318,5 +314,8 @@ dashboard = pn.Column(
     pn.Row(user_input, run_button)
 )
 
-# Serve the app
-dashboard.servable()
+# Serve the Panel App
+if __name__ == "__main__":
+    pn.serve(dashboard, port=8501, show=True)
+    # Serve the app
+    dashboard.servable()
