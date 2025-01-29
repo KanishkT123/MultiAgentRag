@@ -76,7 +76,6 @@ logging.getLogger("mlflow").setLevel(logging.ERROR)
 
 experiment_name = "Autogen Multi-Agent RAG Tracing"
 mlflow.set_experiment(experiment_name)
-mlflow_client = MlflowClient()
 
 #########
 # Tools #
@@ -227,6 +226,15 @@ sql_agent = AssistantAgent(
     reflect_on_tool_use=True
 )
 
+assistant_agent = AssistantAgent(
+    name = "assistant_agent",
+    description = "An assistant agent that provides general information and assistance.",
+    system_message = load_prompt("system_prompts/assistant_prompt.txt"),
+    model_client=az_model_client,
+    tools=[execute_sql, retrieve_results],
+    reflect_on_tool_use=True
+)
+
 user_proxy = UserProxyAgent("user", input_func=get_user_input)
 
 ########
@@ -238,9 +246,16 @@ text_mention_termination = TextMentionTermination("TERMINATE")
 max_messages_termination = MaxMessageTermination(max_messages=5)
 termination = text_mention_termination
 
+# team = SelectorGroupChat(
+#     [orchestrator, rag_agent, sql_agent, user_proxy],
+#     model_client=az_model_client,
+#     termination_condition=termination,
+# )
+
 team = SelectorGroupChat(
-    [orchestrator, rag_agent, sql_agent, user_proxy],
+    [assistant_agent, user_proxy],
     model_client=az_model_client,
+    allow_repeated_speaker=True,
     termination_condition=termination,
 )
 
@@ -261,8 +276,9 @@ run_button = pn.widgets.Button(name="Ask Agents", button_type="primary")
 agent_styles = {
     "user": {"background-color": "#D3E3FC", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content"},
     "orchestrator_agent": {"background-color": "#C8E6C9", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content", "align-self": "flex-end"},
+    "assistant_agent": {"background-color": "#C8E6C9", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content", "align-self": "flex-end"},
     "sql_agent": {"background-color": "#FFECB3", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content"},
-    "rag_agent": {"background-color": "#E1BEE7", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content"},  # Purple for RAG Agent
+    "rag_agent": {"background-color": "#E1BEE7", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content"},
 }
 
 # Function to append messages to chat
@@ -283,18 +299,9 @@ async def run_chat():
     user_input.value = ""  # Clear input field
     start_time = time.time()
 
-    # Start MLflow trace for the chat session
-    root_span = mlflow_client.start_trace(
-    name="simple-rag-agent",
-    inputs={
-            "query": "Demo",
-            "model_name": "DBRX",
-            "temperature": 0,
-            "max_tokens": 200
-            }
-    )
-
-    request_id = root_span.request_id
+    # Ensure any previous MLflow run is ended
+    if mlflow.active_run():
+        mlflow.end_run()
 
     # Start MLflow run for the chat session
     with mlflow.start_run(run_name=f"Chat_{time.strftime('%Y%m%d-%H%M%S')}"):
@@ -319,12 +326,6 @@ async def run_chat():
             # Generate unique numbered filename for each response
             file_name = f"{new_sender}_response_{response_counter}.txt"
             response_counter += 1  # Increment response counter
-            span_ss = mlflow_client.start_span(
-            "search",
-            # Specify request_id and parent_id to create the span at the right position in the trace
-                request_id=request_id,
-                parent_id=root_span.span_id,
-                inputs= {'sender': new_sender})
 
             # Log each response dynamically
             mlflow.log_metric(f"{new_sender} Response Length", len(response))
@@ -333,7 +334,6 @@ async def run_chat():
             # Store response with sequence number for chat history
             response_chain.append(f"{response_counter-1}. [{new_sender}] {response}")
             add_message(new_sender, response)
-            mlflow_client.end_span(request_id, span_id=span_ss.span_id, outputs={'response': response})
         
         # Log entire conversation history in order
         chat_file_name = f"chat_history_{time.strftime('%Y%m%d-%H%M%S')}.txt"
@@ -341,7 +341,8 @@ async def run_chat():
 
         mlflow.log_param("End Time", time.strftime('%Y-%m-%d %H:%M:%S'))
         mlflow.log_param("Chat Duration (seconds)", time.time() - start_time)
-        mlflow_client.end_trace(request_id, outputs={"span_time": time.time() - start_time})
+        # End the MLflow run explicitly to prevent conflicts
+        mlflow.end_run()
 
 # Button click event
 def on_click(event):
