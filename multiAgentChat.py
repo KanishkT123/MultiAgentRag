@@ -16,8 +16,8 @@ from autogen_agentchat.base import TaskResult
 import asyncio
 import panel as pn
 import mlflow, mlflow.pyfunc
+from mlflow.client import MlflowClient
 import time
-
 
 
 # Load environment variables from .env file
@@ -69,35 +69,14 @@ workspace = ml_client.workspace_name
 mlflow_tracking_uri = ml_client.workspaces.get(
     ml_client.workspace_name
 ).mlflow_tracking_uri
-
+mlflow.config.enable_async_logging()
 mlflow.set_tracking_uri(mlflow_tracking_uri)
 logging.getLogger("azure").setLevel(logging.ERROR)
 logging.getLogger("mlflow").setLevel(logging.ERROR)
 
-experiment_name = "Autogen Multi-Agent RAG"
+experiment_name = "Autogen Multi-Agent RAG Tracing"
 mlflow.set_experiment(experiment_name)
-mlflow.autolog()
-
-# Start a single MLflow parent run for the entire chat session
-global mlflow_parent_run
-mlflow_parent_run = None  # Store the parent run globally
-
-# Ensure the parent run is closed when the session ends
-def close_mlflow_run():
-    global mlflow_parent_run
-    if mlflow_parent_run:
-        mlflow.end_run()
-        mlflow_parent_run = None  # Reset after ending
-
-# Function to log agent responses in MLflow
-def log_agent_response(agent_name, input_query, response, start_time):
-    elapsed_time = time.time() - start_time
-    with mlflow.start_run(nested=True):  # Create a nested run for each query
-        mlflow.log_param("agent", agent_name)
-        mlflow.log_param("input_query", input_query)
-        mlflow.log_metric("response_time", elapsed_time)
-        mlflow.log_text(response, f"{agent_name}_response.txt")
-        print(f"Logged {agent_name} response in MLflow.")
+mlflow_client = MlflowClient()
 
 #########
 # Tools #
@@ -294,38 +273,75 @@ def add_message(sender, text):
             styles=agent_styles.get(sender, {"background-color": "#F1F1F1", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content"})
         )
     )
-async def run_chat():
-    global mlflow_parent_run
 
+async def run_chat():
     task = user_input.value.strip()
     if not task:
         return
-
-    # Close any existing MLflow run before starting a new one
-    close_mlflow_run()
 
     add_message("user", task)  # Show user message
     user_input.value = ""  # Clear input field
     start_time = time.time()
 
-    # Start a new MLflow parent run for the chat session
-    mlflow_parent_run = mlflow.start_run(run_name="Multi-Agent Chat Session 2")
+    # Start MLflow trace for the chat session
+    root_span = mlflow_client.start_trace(
+    name="simple-rag-agent",
+    inputs={
+            "query": "Demo",
+            "model_name": "DBRX",
+            "temperature": 0,
+            "max_tokens": 200
+            }
+    )
 
-    async for chunk in team.run_stream(task=task):
-        if isinstance(chunk, TaskResult):
-            continue
-        sender = chunk.source
-        add_message(sender, chunk.content)
+    request_id = root_span.request_id
 
-        # Use a unique nested run for each agent response to prevent overwriting
-        with mlflow.start_run(run_id=mlflow_parent_run.info.run_id, nested=True):
-            mlflow.log_param("agent", sender)  # Each nested run has its own param scope
-            mlflow.log_text(task, "input_query.txt")  # Log query in text file to prevent overwriting
-            mlflow.log_metric("response_time", time.time() - start_time)
-            mlflow.log_text(chunk.content, f"{sender}_response.txt")
+    # Start MLflow run for the chat session
+    with mlflow.start_run(run_name=f"Chat_{time.strftime('%Y%m%d-%H%M%S')}"):
+        mlflow.log_param("User Query", task)
+        mlflow.log_param("Start Time", time.strftime('%Y-%m-%d %H:%M:%S'))
 
-    # Ensure MLflow run closes when conversation ends
-    close_mlflow_run()
+        sender = "user"
+        response_chain = []  # Store all responses for ordered logging
+        response_counter = 1  # Global response counter
+
+        async for chunk in team.run_stream(task=task):
+            if isinstance(chunk, TaskResult):
+                continue
+            
+            response = chunk.content
+            new_sender = chunk.source
+
+            # Ensure response is a string
+            if isinstance(response, list):
+                response = "\n".join(map(str, response))  # Convert list to string
+            
+            # Generate unique numbered filename for each response
+            file_name = f"{new_sender}_response_{response_counter}.txt"
+            response_counter += 1  # Increment response counter
+            span_ss = mlflow_client.start_span(
+            "search",
+            # Specify request_id and parent_id to create the span at the right position in the trace
+                request_id=request_id,
+                parent_id=root_span.span_id,
+                inputs= {'sender': new_sender})
+
+            # Log each response dynamically
+            mlflow.log_metric(f"{new_sender} Response Length", len(response))
+            mlflow.log_text(response, file_name)
+
+            # Store response with sequence number for chat history
+            response_chain.append(f"{response_counter-1}. [{new_sender}] {response}")
+            add_message(new_sender, response)
+            mlflow_client.end_span(request_id, span_id=span_ss.span_id, outputs={'response': response})
+        
+        # Log entire conversation history in order
+        chat_file_name = f"chat_history_{time.strftime('%Y%m%d-%H%M%S')}.txt"
+        mlflow.log_text("\n".join(response_chain), chat_file_name)
+
+        mlflow.log_param("End Time", time.strftime('%Y-%m-%d %H:%M:%S'))
+        mlflow.log_param("Chat Duration (seconds)", time.time() - start_time)
+        mlflow_client.end_trace(request_id, outputs={"span_time": time.time() - start_time})
 
 # Button click event
 def on_click(event):
