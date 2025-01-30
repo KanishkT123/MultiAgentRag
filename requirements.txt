@@ -1,0 +1,11 @@
+autogen-agentchat
+autogen-ext[openai]
+autogen-ext[azure]
+azure-ai-ml
+azure-identity
+azure-cosmos
+python-dotenv
+tenacity
+openai
+mlflow
+panel
