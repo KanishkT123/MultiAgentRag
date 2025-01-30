@@ -13,12 +13,28 @@ This requires:
 1. Azure CosmosDB with Vector Search enabled and Containers built
 2. Azure AI Foundry instance with an Embedding deployment (Tested with `embedding-3-large`)
 3. Azure AI Foundry instance with an inference model deployment (Tested with `gpt-4o`)
+4. Azure ML Workspace for storing MLFlow data
 
-To Run:
+To Seed Data:
+
+(Sometimes, due to permissions issues, it is easier to manually make the containers from Portal/CLI)
 
 1. Run `CosmosCSVImport.py`
 2. Run `CosmosVectorSearch.py`
-3. Use panel to run `multiAgentChat.py` via `panel serve .\multiAgentChat.py`
+
+To Run:
+
+RAG Only:
+
+`panel serve .\rag_chat.py --port 8501 --show`
+
+Single-Agent Chat:
+
+`panel serve .\singleAgentChat.py --port 8501 --show`
+
+Multi-Agent Chat:
+
+`panel serve .\multiAgentChat.py --port 8501 --show`
 
 More detailed instructions to follow. In the meantime, please look at the following links for more info:
 1. https://microsoft.github.io/autogen/stable/user-guide/agentchat-user-guide/selector-group-chat.html
