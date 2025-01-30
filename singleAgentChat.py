@@ -29,9 +29,6 @@ DATABASE_NAME = os.getenv("DATABASE_NAME")
 AZURE_EMBEDDING= os.getenv("AZURE_EMBEDDING")
 AZURE_OPENAI_KEY = os.getenv("AZURE_OPENAI_KEY")
 DIMENSIONS = 1536
-AZURE_SUBSCRIPTION_ID = os.getenv("AZURE_SUBSCRIPTION_ID")
-AZURE_ML_STUDIO_RG = os.getenv("AZURE_ML_STUDIO_RG")
-AZURE_ML_STUDIO_WS = os.getenv("AZURE_ML_STUDIO_WS")
 
 # Authenticate using Managed Identity (DefaultAzureCredential)
 credential = DefaultAzureCredential()
@@ -54,23 +51,17 @@ db = client.create_database_if_not_exists(DATABASE_NAME)
 # Connect to OpenAI (for embedding)
 openai_client = AzureOpenAI(azure_endpoint=AZURE_OPENAI_ENDPOINT, api_key=AZURE_OPENAI_KEY, api_version="2023-05-15")
 
-# Connect to ML Studio for MLFlow Tracking
-ml_client = MLClient(credential=credential,
-                         subscription_id=AZURE_SUBSCRIPTION_ID, 
-                         resource_group_name=AZURE_ML_STUDIO_RG,
-                         workspace_name=AZURE_ML_STUDIO_WS)
-
 ##########
 # MLFlow #
 ##########
-
-workspace = ml_client.workspace_name
-mlflow_tracking_uri = ml_client.workspaces.get(
-    ml_client.workspace_name
-).mlflow_tracking_uri
-mlflow.config.enable_async_logging()
+# MLflow Tracking
+# Set MLflow to track experiments locally
+mlflow_tracking_uri = "http://127.0.0.1:5000"  # Default MLflow UI URL
 mlflow.set_tracking_uri(mlflow_tracking_uri)
-logging.getLogger("azure").setLevel(logging.ERROR)
+logging.getLogger("mlflow").setLevel(logging.ERROR)
+# Ensure async logging is still enabled
+mlflow.config.enable_async_logging()
+
 logging.getLogger("mlflow").setLevel(logging.ERROR)
 
 experiment_name = "Autogen Multi-Agent RAG Tracing"
@@ -305,7 +296,7 @@ async def run_chat():
         mlflow.log_text("\n".join(response_chain), chat_file_name)
 
         mlflow.log_param("End Time", time.strftime('%Y-%m-%d %H:%M:%S'))
-        mlflow.log_param("Chat Duration (seconds)", time.time() - start_time)
+        mlflow.log_param("Chat Duration seconds", time.time() - start_time)
         # End the MLflow run explicitly to prevent conflicts
         mlflow.end_run()
 
