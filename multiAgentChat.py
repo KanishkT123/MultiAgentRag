@@ -16,7 +16,6 @@ from autogen_agentchat.base import TaskResult
 import asyncio
 import panel as pn
 import mlflow, mlflow.pyfunc
-from mlflow.client import MlflowClient
 import time
 
 
@@ -201,31 +200,6 @@ def load_prompt(prompt_file):
 # Agents #
 ##########
 
-orchestrator = AssistantAgent(
-    name= "orchestrator_agent",
-    description = "An orchestrator agent that breaks down a complex query into subqueries. This agent should be the first to engage.",
-    system_message = load_prompt("system_prompts/orchestrator_prompt.txt"),
-    model_client=az_model_client
-)
-
-rag_agent = AssistantAgent(
-    name = "rag_agent",
-    description="A retrieval agent that retrieves unstructured data using Vector Search.",
-    system_message = load_prompt("system_prompts/rag_prompt.txt"),
-    tools = [retrieve_results],
-    reflect_on_tool_use=True,
-    model_client=az_model_client
-)
-
-sql_agent = AssistantAgent(
-    name = "sql_agent",
-    description= "A SQL query agent that retrieves structured data from CosmosDB.",
-    system_message = load_prompt("system_prompts/sql_prompt.txt"),
-    model_client=az_model_client,
-    tools=[execute_sql],
-    reflect_on_tool_use=True
-)
-
 assistant_agent = AssistantAgent(
     name = "assistant_agent",
     description = "An assistant agent that provides general information and assistance.",
@@ -245,12 +219,6 @@ user_proxy = UserProxyAgent("user", input_func=get_user_input)
 text_mention_termination = TextMentionTermination("TERMINATE")
 max_messages_termination = MaxMessageTermination(max_messages=5)
 termination = text_mention_termination
-
-# team = SelectorGroupChat(
-#     [orchestrator, rag_agent, sql_agent, user_proxy],
-#     model_client=az_model_client,
-#     termination_condition=termination,
-# )
 
 team = SelectorGroupChat(
     [assistant_agent, user_proxy],
@@ -275,10 +243,7 @@ run_button = pn.widgets.Button(name="Ask Agents", button_type="primary")
 # Agent styling dictionary (Converted to valid dict format)
 agent_styles = {
     "user": {"background-color": "#D3E3FC", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content"},
-    "orchestrator_agent": {"background-color": "#C8E6C9", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content", "align-self": "flex-end"},
     "assistant_agent": {"background-color": "#C8E6C9", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content", "align-self": "flex-end"},
-    "sql_agent": {"background-color": "#FFECB3", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content"},
-    "rag_agent": {"background-color": "#E1BEE7", "padding": "8px", "border-radius": "8px", "margin": "5px", "width": "fit-content"},
 }
 
 # Function to append messages to chat
@@ -352,7 +317,7 @@ run_button.on_click(on_click)
 
 # Layout
 dashboard = pn.Column(
-    pn.pane.Markdown("## 🤖 Multi-Agent Chat", sizing_mode="stretch_width"),
+    pn.pane.Markdown("## 🤖 Single-Agent Chat", sizing_mode="stretch_width"),
     chat_feed,
     pn.Row(user_input, run_button)
 )
